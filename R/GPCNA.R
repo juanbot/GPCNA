@@ -54,15 +54,16 @@ getModulesEnrichment <- function(net,
   
   modules = unique(net$moduleColors)
   markers.set = getMarkerGenes( markers.path )
-  print(markers.set)
+  #print(markers.set)
   # We remove duplicated and genes not included in the network we are going to analyze to reduce bias
   for ( i in 1:length(markers.set) ) {
     if ( debug ) {
       print( paste0( "Enrichment file", names(markers.set)[i], " contains ", 
                      length(markers.set[[i]]), " genes"))
     }
-    markers.set[[i]] = unique(markers.set[[i]])
-    markers.set[[i]] = markers.set[[i]][is.element(markers.set[[i]], names(net$moduleColors))]
+    markers.set[[i]] = unique(fromAny2Ensembl(markers.set[[i]]))
+    markers.set[[i]] = markers.set[[i]][is.element(markers.set[[i]], 
+                                                   fromAny2Ensembl(names(net$moduleColors)))]
     if ( debug ) {
       print( paste0( "After removing duplicated and genes not included in the network we have: ", 
                      length(markers.set[[i]]), " genes"))
@@ -70,7 +71,8 @@ getModulesEnrichment <- function(net,
   }
   m = NULL
   for ( module in modules ) {
-    genes.module = names(net$moduleColors[net$moduleColors == module] )
+    genes.module = fromAny2Ensembl(names(net$moduleColors[net$moduleColors == module] ))
+    #print(genes.module)
     n = NULL
     for ( enrichment.name in names(markers.set) ) {
       markers = markers.set[[enrichment.name]]
@@ -114,7 +116,7 @@ getModulesEnrichment <- function(net,
     # Filter out too big values
     m = ifelse( m >= 1, 1, m)
   }
-  print(m)
+  #print(m)
   if(sum(m < significanceThreshold) == 0){
     warning("This is weird: getModulesEnrichment detects no enrichment. Perhaps genes are not symbols?")
   }
@@ -179,16 +181,16 @@ removePrimaryEffect <- function( expr.data, target.enrichment, net = NULL,
     net = getDownstreamNetwork(tissue="GPCNA",
                                expr.data=expr.data,
                                job.path = NULL) 
-    #net = createGCN( expr.data )
+    
   } else {
     if ( typeof( net ) == "character" ) {
       net.filename = net
       net = readRDS( net.filename )
     }
   }
-  #JB
+  
   modules.to.clean = modules.to.clean[modules.to.clean != "grey"]
-  #JB
+  
   if ( ( is.null(target.enrichment) || length(target.enrichment) == 0 ) && ( is.null(modules.to.clean) || length(modules.to.clean) == 0 ) ) {
     stop( "target.enrichment must be a character list containing one or mor enrichment names when modules.to clean is NULL or empty" )
     return (NULL)
@@ -510,8 +512,8 @@ createPSGCN = function(expr.data,
   stopifnot(!is.null(tissue))
   stopifnot(typeof(tissue) == "character")
   stopifnot(dir.exists(job.path))
-  stopifnot(length(grep("^ENSG",colnames(expr.data))) == length(colnames(expr.data)))
   
+  stopifnot(length(unique(colnames(expr.data))) == length(colnames(expr.data)))
   
   pnetname = paste0(job.path,"/primaryNet",tissue,".rds")
   pdataname = paste0(job.path,"/primaryExprData",tissue,".rds")
@@ -527,7 +529,14 @@ createPSGCN = function(expr.data,
   saveRDS(net,pnetname)
   saveRDS(expr.data,pdataname)
   
-  createSGCN(pdataname,pnetname,...)
+  createSGCN(original.data.filename = pdataname, 
+             primary.net.filename = pnetname,
+             significanceThreshold = significanceThreshold,
+             markers.path = markers.path,
+             celltypes = celltypes,
+             cellsubtypes = cellsubtypes,
+             tissue = tissue,
+             ...)
 }
 
 
@@ -544,6 +553,7 @@ createSGCN = function( original.data.filename,
   
   stopifnot(file.exists(original.data.filename))
   stopifnot(file.exists(primary.net.filename))
+  stopifnot(sum(celltypes %in% names(cellsubtypes)) == length(celltypes))
   
   if ( is.null( tissue ) ) {
     tissue = unlist(strsplit(original.data.filename, "[.]"))[1]
@@ -584,6 +594,7 @@ createSGCN = function( original.data.filename,
     if ( is.null(cleaned.data) ) {
       print("Nothing done creating secondary net")
     } else {
+      
       secondary.data.filename = paste0( original.data.filename, ".No.", ct, ".rds" )
       secondary.net.filename = paste0( primary.net.filename, ".No.", ct, ".rds" )
       saveRDS( cleaned.data, secondary.data.filename )
@@ -609,7 +620,8 @@ getPredictions = function(primary.net.filename,
                                                      package = "GPCNA"),
                           significanceThreshold = 0.05, 
                           celltypes=c("N","MG","OLG","MA"), 
-                          cellsubtypes = getCellSubtypes()){
+                          cellsubtypes = getCellSubtypes(),
+                          filterStronglyTyped = T){
   supertabla = data.frame()
   original.data = readRDS(original.data.filename)
   primary.net = readRDS(primary.net.filename)
@@ -621,59 +633,68 @@ getPredictions = function(primary.net.filename,
         print( paste0( "Subprocesing: ", localct ) )
         secondary.net.filename = paste0( primary.net.filename, ".No.", localct, ".rds" )
         secondary.data.filename = paste0( original.data.filename, ".No.", localct, ".rds" )
-        secondary.net = readRDS( secondary.net.filename )
-        cleaned.data = readRDS( secondary.data.filename )
-        variance.changes = varianceEvolution( original.data, cleaned.data, genes = NULL )
-        
-        secondary.enrichment.by.module = getModulesEnrichment( net = secondary.net,
-                                                               markers.path = markers.path,
-                                                               outputCorrectedPvalues = T)
-        secondary.enrichment.names = rownames(secondary.enrichment.by.module)
-        
-        primary.module.enrichment = summaryModuleEnrichment(primary.net.filename = primary.net.filename,
-                                                            significanceThreshold = significanceThreshold,
-                                                            markers.path = markers.path,
-                                                            celltypes = celltypes,
-                                                            cellsubtypes = cellsubtypes)
-        
-        modules.to.clean = names(primary.module.enrichment)[which(primary.module.enrichment == src.ct)]
-        print( "modules.to.clean: " )
-        print( modules.to.clean )
-        processed.genes = names(primary.net$moduleColors[primary.net$moduleColors %in% modules.to.clean])
-        if ( length( processed.genes ) == 0 ) next
-        secondary.module.enrichment = aggModEnrichmentConf( enrichment.by.module = secondary.enrichment.by.module,
-                                                            celltypes = celltypes,
-                                                            cellsubtypes = cellsubtypes,
-                                                            significanceThreshold = significanceThreshold,
-                                                            singleSignal = F, F)
-        
-        processed.genes.celltype.changes = data.frame( gene = processed.genes,
-                                                       primary.module = as.character(primary.net$moduleColors[processed.genes]),
-                                                       primary.enrichment = src.ct,
-                                                       secondary.module = as.character(secondary.net$moduleColors[processed.genes]),
-                                                       secondary.enrichment = as.character(secondary.module.enrichment[secondary.net$moduleColors[processed.genes]]),
-                                                       sec.net = secondary.net.filename,
-                                                       stringsAsFactors=F,
-                                                       row.names=NULL )
-        
-        
-        processed.genes.variance.changes = variance.changes[variance.changes$gene %in% processed.genes, ]
-        markers = getMarkerGenes( markers.path )
-        crv = 1 - processed.genes.variance.changes$cleaned.variance / processed.genes.variance.changes$original.variance
-        
-        tabla = cbind( processed.genes.celltype.changes, crv, processed.genes.variance.changes[, 2:3])
-        tabla$third = ifelse( crv < .33, 1, ifelse( crv >= 0.33 & crv <= 0.66, 2, 3) )
-        # type 1 es que ha cambiado de tipo de célula, type 2 es que se mantiene, type 3 es que se desactiva
-        tabla$type = ifelse( tabla$primary.enrichment != tabla$secondary.enrichment & tabla$secondary.enrichment != "-", 1,
-                             ifelse( tabla$primary.enrichment == tabla$secondary.enrichment & tabla$secondary.enrichment != "-", 2,
-                                     ifelse(tabla$primary.enrichment != tabla$secondary.enrichment & tabla$secondary.enrichment == "-", 3, 0)) )
-        target = c(src.ct)
-        if ( !is.null( cellsubtypes ) ) {
-          if ( exists( src.ct, cellsubtypes ) ) 
-            target = as.vector(unlist(cellsubtypes[src.ct]))
+        if(file.exists(secondary.net.filename) & file.exists(secondary.data.filename)){
+          secondary.net = readRDS( secondary.net.filename )
+          cleaned.data = readRDS( secondary.data.filename )
+          variance.changes = varianceEvolution( original.data, cleaned.data, genes = NULL )
+          
+          secondary.enrichment.by.module = getModulesEnrichment( net = secondary.net,
+                                                                 markers.path = markers.path,
+                                                                 outputCorrectedPvalues = T)
+          secondary.enrichment.names = rownames(secondary.enrichment.by.module)
+          
+          primary.module.enrichment = summaryModuleEnrichment(primary.net.filename = primary.net.filename,
+                                                              significanceThreshold = significanceThreshold,
+                                                              markers.path = markers.path,
+                                                              celltypes = celltypes,
+                                                              cellsubtypes = cellsubtypes)
+          
+          modules.to.clean = names(primary.module.enrichment)[which(primary.module.enrichment == src.ct)]
+          print( "modules.to.clean: " )
+          print( modules.to.clean )
+          processed.genes = names(primary.net$moduleColors[primary.net$moduleColors %in% modules.to.clean])
+          if ( length( processed.genes ) == 0 ) next
+          secondary.module.enrichment = aggModEnrichmentConf( enrichment.by.module = secondary.enrichment.by.module,
+                                                              celltypes = celltypes,
+                                                              cellsubtypes = cellsubtypes,
+                                                              significanceThreshold = significanceThreshold,
+                                                              singleSignal = F, F)
+          
+          processed.genes.celltype.changes = data.frame( gene = processed.genes,
+                                                         primary.module = as.character(primary.net$moduleColors[processed.genes]),
+                                                         primary.enrichment = src.ct,
+                                                         secondary.module = as.character(secondary.net$moduleColors[processed.genes]),
+                                                         secondary.enrichment = as.character(secondary.module.enrichment[secondary.net$moduleColors[processed.genes]]),
+                                                         sec.net = basename(secondary.net.filename),
+                                                         stringsAsFactors=F,
+                                                         row.names=NULL )
+          
+          
+          processed.genes.variance.changes = variance.changes[variance.changes$gene %in% processed.genes, ]
+          markers = getMarkerGenes( markers.path )
+          crv = 1 - processed.genes.variance.changes$cleaned.variance / processed.genes.variance.changes$original.variance
+          
+          tabla = cbind( processed.genes.celltype.changes, crv, processed.genes.variance.changes[, 2:3])
+          tabla$third = ifelse( crv < .33, 1, ifelse( crv >= 0.33 & crv <= 0.66, 2, 3) )
+          # type 1 es que ha cambiado de tipo de célula, type 2 es que se mantiene, type 3 es que se desactiva
+          tabla$type = ifelse( tabla$primary.enrichment != tabla$secondary.enrichment & tabla$secondary.enrichment != "-", 1,
+                               ifelse( tabla$primary.enrichment == tabla$secondary.enrichment & tabla$secondary.enrichment != "-", 2,
+                                       ifelse(tabla$primary.enrichment != tabla$secondary.enrichment & tabla$secondary.enrichment == "-", 3, 0)) )
+          target = c(src.ct)
+          if ( !is.null( cellsubtypes ) ) {
+            if ( exists( src.ct, cellsubtypes ) ) 
+              target = as.vector(unlist(cellsubtypes[src.ct]))
+          }
+          
+          tabla$ensgene = fromAny2Ensembl(tabla$gene)
+          
+          if(target != "-"){
+            tabla$marker =  tabla$ensgene %in% fromAny2Ensembl(unlist(markers[target]))
+          }else
+            tabla$marker = rep(F,nrow(tabla))
+          
+          supertabla = rbind( supertabla, tabla )  
         }
-        tabla$marker = tabla$gene %in% unlist(markers[target])
-        supertabla = rbind( supertabla, tabla )
       }
       
     }else{
@@ -712,7 +733,7 @@ getPredictions = function(primary.net.filename,
                                                        primary.enrichment = src.ct,
                                                        secondary.module = as.character(secondary.net$moduleColors[processed.genes]),
                                                        secondary.enrichment = as.character(secondary.module.enrichment[secondary.net$moduleColors[processed.genes]]),
-                                                       sec.net = secondary.net.filename,
+                                                       sec.net = basename(secondary.net.filename),
                                                        stringsAsFactors=F,
                                                        row.names=NULL )
         
@@ -735,14 +756,18 @@ getPredictions = function(primary.net.filename,
             target = as.vector(unlist(cellsubtypes[src.ct]))
           }
         }
-        tabla$marker = tabla$gene %in% unlist(markers[target])
+        
+        tabla$ensgene = fromAny2Ensembl(tabla$gene)
+        tabla$marker =  tabla$ensgene %in% fromAny2Ensembl(unlist(markers[target]))
+        
         supertabla = rbind( supertabla, tabla )
       }
       
     }
   }
   
-  supertabla = supertabla[!(supertabla$primary.enrichment == "-" & supertabla$secondary.enrichment == "-"),]
+  if(filterStronglyTyped)
+    supertabla = supertabla[!(supertabla$primary.enrichment == "-" & supertabla$secondary.enrichment == "-"),]
   return(supertabla)
 }
 
